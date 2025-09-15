@@ -43,6 +43,8 @@ class OptimizedFlameDetector:
         self.frame_count = 0
         self.fps_start_time = time.time()
         self.current_fps = 0
+        self.last_fps_update = time.time()
+        self.fps_frame_count = 0
         
         # Start background threads
         self._start_threads()
@@ -100,26 +102,25 @@ class OptimizedFlameDetector:
             raise
     
     def _setup_arduino(self):
-        """Setup Arduino with non-blocking serial communication"""
+        """Setup Arduino with simple serial communication"""
         try:
             ports = list(serial.tools.list_ports.comports())
             if not ports:
                 logger.warning("No serial ports found - running without Arduino")
                 return None
             
-            # Try to connect to Arduino (usually on USB ports)
+            # Try to connect to first available port (simpler approach)
             for port_info in ports:
                 try:
-                    if 'USB' in port_info.description or 'Arduino' in port_info.description:
-                        arduino = serial.Serial(
-                            port=port_info.device,
-                            baudrate=9600,
-                            timeout=0.01,  # Very short timeout for non-blocking
-                            write_timeout=0.01
-                        )
-                        time.sleep(2)  # Allow Arduino to reset
-                        logger.info(f"Arduino connected on {port_info.device}")
-                        return arduino
+                    arduino = serial.Serial(
+                        port=port_info.device,
+                        baudrate=9600,
+                        timeout=0.1,  # Short timeout for non-blocking
+                        write_timeout=0.1
+                    )
+                    time.sleep(2)  # Allow Arduino to reset
+                    logger.info(f"Arduino connected on {port_info.device}")
+                    return arduino
                 except Exception as e:
                     logger.warning(f"Failed to connect to {port_info.device}: {e}")
                     continue
@@ -143,28 +144,29 @@ class OptimizedFlameDetector:
         capture_thread.start()
     
     def _serial_worker(self):
-        """Background thread for Arduino communication"""
+        """Background thread for simple Arduino communication"""
         while self.running and self.arduino:
             try:
-                # Send data to Arduino (non-blocking)
+                # Send data to Arduino (simple and direct)
                 if not self.serial_queue.empty():
                     try:
                         message = self.serial_queue.get_nowait()
                         self.arduino.write(f"{message}\n".encode('utf-8'))
                         self.arduino.flush()
+                        logger.info(f"Sent to Arduino: {message}")
                     except Exception as e:
                         logger.warning(f"Serial write error: {e}")
                 
-                # Read response from Arduino (non-blocking)
-                if self.arduino.in_waiting:
-                    try:
+                # Read any response from Arduino (optional)
+                try:
+                    if self.arduino.in_waiting > 0:
                         response = self.arduino.readline().decode('utf-8').strip()
                         if response:
-                            logger.info(f"Arduino: {response}")
-                    except Exception as e:
-                        logger.warning(f"Serial read error: {e}")
+                            logger.info(f"Arduino response: {response}")
+                except Exception as e:
+                    logger.warning(f"Serial read error: {e}")
                 
-                time.sleep(0.01)  # Small delay to prevent CPU overload
+                time.sleep(0.05)  # Small delay to prevent CPU overload
                 
             except Exception as e:
                 logger.error(f"Serial worker error: {e}")
@@ -245,20 +247,23 @@ class OptimizedFlameDetector:
                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, position_color, 2)
         
         # Show FPS
-        cv2.putText(frame, f"FPS: {self.current_fps:.1f}", (10, 30), 
+        fps_text = f"FPS: {self.current_fps:.1f}" if self.current_fps > 0 else "FPS: Calculating..."
+        cv2.putText(frame, fps_text, (10, 30), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
         
         return frame
     
     def update_fps(self):
-        """Update FPS calculation"""
-        self.frame_count += 1
-        if self.frame_count % 30 == 0:  # Update every 30 frames
-            current_time = time.time()
-            elapsed = current_time - self.fps_start_time
-            if elapsed > 0:
-                self.current_fps = 30 / elapsed
-            self.fps_start_time = current_time
+        """Update FPS calculation - simple and accurate"""
+        current_time = time.time()
+        self.fps_frame_count += 1
+        
+        # Update FPS every second
+        if current_time - self.last_fps_update >= 1.0:
+            elapsed = current_time - self.last_fps_update
+            self.current_fps = self.fps_frame_count / elapsed
+            self.fps_frame_count = 0
+            self.last_fps_update = current_time
     
     def run(self):
         """Main detection loop"""
