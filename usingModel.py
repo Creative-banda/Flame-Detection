@@ -1,13 +1,29 @@
 import cv2
 from ultralytics import YOLO
 import serial
+import serial.tools.list_ports
 import time
+
 # Load your trained YOLO model
 model = YOLO("best_v2.pt") 
 
+def get_first_port(baudrate=9600, timeout=1):
+    ports = list(serial.tools.list_ports.comports())
+    if not ports:
+        raise Exception("No serial ports found!")
+
+    for p in ports:
+        print("Found port:", p.device)
+    
+    # Pick the first one
+    return serial.Serial(port=ports[0].device, baudrate=baudrate, timeout=timeout)
+
+# Usage
+arduino = get_first_port()
+print("Connected to:", arduino.port)
+
 # Open serial connection to Arduino
-arduino = serial.Serial(port='COM3', baudrate=9600, timeout=1)  # change COM3 → your port
-time.sleep(2)  # wait for Arduino +to reset
+time.sleep(2)  # wait for Arduino to reset
 
 
 # Open webcam
@@ -48,6 +64,7 @@ def detect_flame_position(results, frame_width):
                 flame_positions.append("Center")
 
     return flame_positions
+
 
 while True:
     ret, frame = cap.read()
