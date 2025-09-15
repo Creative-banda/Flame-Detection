@@ -25,9 +25,16 @@ print("Connected to:", arduino.port)
 # Open serial connection to Arduino
 time.sleep(2)  # wait for Arduino to reset
 
+def get_camera():
+    for i in range(5):  # check first 5 indexes
+        cap = cv2.VideoCapture(i)
+        if cap.isOpened():
+            print(f"Camera found at index {i}")
+            return cap
+    raise RuntimeError("No camera found")
 
-# Open webcam
-cap = cv2.VideoCapture(0)   
+cap = get_camera()
+
 
 if not cap.isOpened():
     print("Error: Could not open camera.")
