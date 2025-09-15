@@ -4,123 +4,93 @@ import serial
 import serial.tools.list_ports
 import time
 
-# Load your trained YOLO model
-model = YOLO("best_v2.pt") 
+# ---------------- YOLO Model ---------------- #
+model = YOLO("best_v2.pt")
 
-def get_first_port(baudrate=9600, timeout=1):
+# ---------------- Serial Setup ---------------- #
+def get_first_port(baudrate=9600, timeout=0):  # non-blocking
     ports = list(serial.tools.list_ports.comports())
     if not ports:
         raise Exception("No serial ports found!")
-
     for p in ports:
         print("Found port:", p.device)
-    
-    # Pick the first one
     return serial.Serial(port=ports[0].device, baudrate=baudrate, timeout=timeout)
 
-# Usage
 arduino = get_first_port()
 print("Connected to:", arduino.port)
+time.sleep(2)  # allow Arduino reset
 
-# Open serial connection to Arduino
-time.sleep(2)  # wait for Arduino to reset
-
+# ---------------- Camera Setup ---------------- #
 def get_camera():
-    for i in range(5):  # check first 5 indexes
-        cap = cv2.VideoCapture(i)
+    for i in range(5):  # try first 5 indexes
+        cap = cv2.VideoCapture(i, cv2.CAP_V4L2)  # force V4L2 for Pi
         if cap.isOpened():
             print(f"Camera found at index {i}")
+            # Optimize camera settings
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            cap.set(cv2.CAP_PROP_FPS, 15)
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))  # if supported
             return cap
     raise RuntimeError("No camera found")
 
 cap = get_camera()
 
-
-if not cap.isOpened():
-    print("Error: Could not open camera.")
-    exit()
-
+# ---------------- Helper ---------------- #
 def detect_flame_position(results, frame_width):
-    """
-    Detect flame position relative to center of frame
-    Returns: 'LEFT', 'RIGHT', 'CENTER', or None if no flame detected
-    """
     flame_positions = []
-    
-    # Get the detection results
     boxes = results[0].boxes
-    
     if boxes is not None and len(boxes) > 0:
-        # Calculate frame center
         center_x = frame_width // 2
-        
-        # Process each detection
         for box in boxes:
-            # Get bounding box coordinates
             x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-            
-            # Calculate center of the detected flame
             flame_center_x = (x1 + x2) / 2
-            
-            # Determine position relative to frame center
-            if flame_center_x < center_x - 50:  # Left side (with small buffer)
+            if flame_center_x < center_x - 50:
                 flame_positions.append("Left")
-            elif flame_center_x > center_x + 50:  # Right side (with small buffer)
+            elif flame_center_x > center_x + 50:
                 flame_positions.append("Right")
             else:
                 flame_positions.append("Center")
-
     return flame_positions
 
-
+# ---------------- Main Loop ---------------- #
 while True:
     ret, frame = cap.read()
     if not ret:
-        break
+        continue  # don’t break, just skip frame
 
-    # Get frame dimensions
-    frame_height, frame_width = frame.shape[:2]
-    
-    # Run YOLO detection on the frame
-    results = model.predict(frame, conf=0.4, verbose=False)  
+    # Resize before inference
+    resized = cv2.resize(frame, (640, 480))
 
-    # Detect flame positions
+    # Faster inference call
+    results = model(resized, conf=0.4, verbose=False)
+
+    # Get detections
+    frame_height, frame_width = resized.shape[:2]
     flame_positions = detect_flame_position(results, frame_width)
-    
-    # Draw detections on the frame
+
+    # Draw results
     annotated_frame = results[0].plot()
-    
-    # Draw center line for reference
     cv2.line(annotated_frame, (frame_width // 2, 0), (frame_width // 2, frame_height), (255, 255, 255), 2)
-    cv2.putText(annotated_frame, "CENTER", (frame_width // 2 - 30, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-    
-    # Display flame positions and print to console
-    if flame_positions:
-        position = flame_positions[0]
-        cv2.putText(annotated_frame, f"FLAME: {position}", (10, 60),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        arduino.write((position + "\n").encode())
-        # print("Sent to Arduino:", position)
+    cv2.putText(annotated_frame, "CENTER", (frame_width // 2 - 30, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
-        # Read echo from Arduino
-        response = arduino.readline().decode().strip()
-        if response:
-            print("Arduino says:", response)
-    else:
-        arduino.write(("NONE\n").encode())
-        response = arduino.readline().decode().strip()
-        if response:
-            print("Arduino says:", response)
+    # Send to Arduino (non-blocking)
+    position = flame_positions[0] if flame_positions else "NONE"
+    arduino.write((position + "\n").encode())
 
+    # Non-blocking read
+    response = arduino.readline().decode().strip()
+    if response:
+        print("Arduino:", response)
 
-
-    # Show the frame
-    cv2.imshow("YOLO Fire Detection with Position", annotated_frame)
+    # Show window
+    cv2.imshow("YOLO Fire Detection", annotated_frame)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
-# Release resources
+# ---------------- Cleanup ---------------- #
 cap.release()
 cv2.destroyAllWindows()
 arduino.close()
