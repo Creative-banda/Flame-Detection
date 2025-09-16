@@ -24,8 +24,8 @@ logger = logging.getLogger(__name__)
 class OptimizedFlameDetector:
     def __init__(self, model_path="best_v2.pt", camera_index=0):
         # Performance settings
-        self.TARGET_FPS = 10
-        self.FRAME_SKIP = 2  # Process every 2nd frame for speed
+        self.TARGET_FPS = 60
+        self.FRAME_SKIP = 1  # Process every 2nd frame for speed
         self.INPUT_SIZE = (640, 480)
         self.CONFIDENCE_THRESHOLD = 0.4
         
@@ -276,11 +276,7 @@ class OptimizedFlameDetector:
                     frame = self.frame_queue.get(timeout=0.1)
                 except Empty:
                     continue
-                
-                # Skip frames for performance (process every nth frame)
-                if self.frame_count % self.FRAME_SKIP != 0:
-                    self.frame_count += 1
-                    continue
+            
                 
                 # Ensure frame is correct size
                 if frame.shape[:2] != self.INPUT_SIZE[::-1]:
