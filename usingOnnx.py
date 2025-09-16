@@ -26,7 +26,7 @@ class OptimizedFlameDetector:
         # Performance settings
         self.TARGET_FPS = 10
         self.FRAME_SKIP = 2  # Process every 2nd frame for speed
-        self.INPUT_SIZE = (640, 480)
+        self.INPUT_SIZE = (640, 640)  # YOLO models typically use square input
         self.CONFIDENCE_THRESHOLD = 0.4
         self.NMS_THRESHOLD = 0.45
         
@@ -74,11 +74,22 @@ class OptimizedFlameDetector:
             self.input_name = session.get_inputs()[0].name
             self.output_names = [output.name for output in session.get_outputs()]
             
+            # Get actual input shape from model
+            input_shape = session.get_inputs()[0].shape
+            logger.info(f"Model input shape: {input_shape}")
+            
+            # Update INPUT_SIZE based on model requirements
+            if len(input_shape) == 4:  # [batch, channels, height, width]
+                model_height = input_shape[2]
+                model_width = input_shape[3]
+                self.INPUT_SIZE = (model_width, model_height)
+                logger.info(f"Updated INPUT_SIZE to: {self.INPUT_SIZE}")
+            
             logger.info(f"ONNX model loaded successfully")
             logger.info(f"Input: {self.input_name}")
             logger.info(f"Outputs: {self.output_names}")
             
-            # Warm up the model
+            # Warm up the model with correct dimensions
             dummy_input = np.random.randn(1, 3, self.INPUT_SIZE[1], self.INPUT_SIZE[0]).astype(np.float32)
             _ = session.run(self.output_names, {self.input_name: dummy_input})
             logger.info("Model warmed up successfully")
@@ -102,9 +113,9 @@ class OptimizedFlameDetector:
             else:
                 raise RuntimeError("Failed to open camera with any backend")
             
-            # Optimize camera settings for performance
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.INPUT_SIZE[0])
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.INPUT_SIZE[1])
+            # Set camera resolution (use 640x480 for capture, will resize for model)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
             cap.set(cv2.CAP_PROP_FPS, 15)
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimize buffer lag
             
@@ -114,7 +125,7 @@ class OptimizedFlameDetector:
             # Disable auto-exposure and auto-white balance for consistent performance
             cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
             
-            logger.info(f"Camera configured: {self.INPUT_SIZE[0]}x{self.INPUT_SIZE[1]} @ 15 FPS")
+            logger.info(f"Camera configured: 640x480 @ 15 FPS (will resize to {self.INPUT_SIZE} for model)")
             return cap
             
         except Exception as e:
@@ -323,6 +334,30 @@ class OptimizedFlameDetector:
         # Return position of first detection
         return positions[0] if positions else "NONE"
     
+    def detect_flame_position_scaled(self, boxes, frame_width):
+        """Detect flame position relative to center for scaled coordinates"""
+        if not boxes:
+            return "NONE"
+        
+        center_x = frame_width // 2
+        positions = []
+        
+        for box in boxes:
+            x1, y1, x2, y2 = box
+            flame_center_x = (x1 + x2) / 2
+            
+            # Determine position with buffer zone
+            buffer = frame_width * 0.125  # 12.5% of frame width as buffer
+            if flame_center_x < center_x - buffer:
+                positions.append("LEFT")
+            elif flame_center_x > center_x + buffer:
+                positions.append("RIGHT")
+            else:
+                positions.append("CENTER")
+        
+        # Return position of first detection
+        return positions[0] if positions else "NONE"
+    
     def draw_overlay(self, frame, boxes, confidences, position):
         """Draw detection overlay on frame"""
         # Draw center line
@@ -390,11 +425,10 @@ class OptimizedFlameDetector:
                     self.frame_count += 1
                     continue
                 
-                # Ensure frame is correct size
-                if frame.shape[:2] != self.INPUT_SIZE[::-1]:
-                    frame = cv2.resize(frame, self.INPUT_SIZE)
+                # Store original frame for display
+                original_frame = frame.copy()
                 
-                # Preprocess frame for ONNX
+                # Preprocess frame for ONNX (will resize to model requirements)
                 start_time = time.time()
                 input_tensor = self.preprocess_frame(frame)
                 
@@ -405,8 +439,23 @@ class OptimizedFlameDetector:
                     # Process outputs
                     boxes, confidences, class_ids = self.postprocess_outputs(outputs)
                     
-                    # Detect flame position
-                    position = self.detect_flame_position(boxes)
+                    # Scale boxes back to original frame size
+                    if boxes:
+                        scale_x = original_frame.shape[1] / self.INPUT_SIZE[0]
+                        scale_y = original_frame.shape[0] / self.INPUT_SIZE[1]
+                        scaled_boxes = []
+                        for box in boxes:
+                            x1, y1, x2, y2 = box
+                            scaled_boxes.append([
+                                int(x1 * scale_x),
+                                int(y1 * scale_y),
+                                int(x2 * scale_x),
+                                int(y2 * scale_y)
+                            ])
+                        boxes = scaled_boxes
+                    
+                    # Detect flame position (use original frame width for position calculation)
+                    position = self.detect_flame_position_scaled(boxes, original_frame.shape[1])
                     
                     # Send position to Arduino (non-blocking)
                     if self.arduino:
@@ -420,12 +469,12 @@ class OptimizedFlameDetector:
                         logger.info(f"Flame detected: {position} (confidence: {max(confidences) if confidences else 0:.2f})")
                     
                     # Draw overlay and display
-                    display_frame = self.draw_overlay(frame.copy(), boxes, confidences, position)
+                    display_frame = self.draw_overlay(original_frame, boxes, confidences, position)
                     cv2.imshow("ONNX Flame Detection", display_frame)
                     
                 except Exception as e:
                     logger.error(f"Inference error: {e}")
-                    cv2.imshow("ONNX Flame Detection", frame)
+                    cv2.imshow("ONNX Flame Detection", original_frame)
                 
                 inference_time = time.time() - start_time
                 
